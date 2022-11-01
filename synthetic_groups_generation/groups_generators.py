@@ -10,7 +10,8 @@ random.seed(1010101)
 # https://github.com/mesutkaya/recsys2020/blob/8a8c7088bebc3309b8517f62248386ea7be39776/GFAR_python/create_group.py
 
 class GroupsGenerator(ABC):
-
+    #modify to keep all group members above/below similarity threshold
+    #add a subgroup of two
     @staticmethod
     def getGroupsGenerator(type):
         if type == "RANDOM":
@@ -21,6 +22,8 @@ class GroupsGenerator(ABC):
             return DivergentGroupsGenerator()
         elif type == "SIMILAR_ONE_DIVERGENT":
             return MinorityGroupsGenerator()
+        elif type == "TWO_DIVERGENT_SUBGROUPS":
+            return TwoSubgroupsGenerator()        
         return None
 
     @staticmethod
@@ -71,12 +74,13 @@ class SimilarGroupsGenerator(GroupsGenerator):
         :param sim_threshold:
         :return:
         '''
-        ids_to_select_from = set()
+        #print(set(user_id_indexes))
+        ids_to_select_from = set(user_id_indexes) # in original version, this was: set()
         for member in group:
             member_index = user_id_indexes.tolist().index(member)
             indexes = np.where(sim_matrix[member_index] >= sim_threshold)[0].tolist()
             user_ids = [user_id_indexes[index] for index in indexes]
-            ids_to_select_from = ids_to_select_from.union(set(user_ids))
+            ids_to_select_from = ids_to_select_from.intersection(set(user_ids)) # .union in original implementation
         candidate_ids = ids_to_select_from.difference(set(group))
         if len(candidate_ids) == 0:
             return None
@@ -124,12 +128,12 @@ class DivergentGroupsGenerator(GroupsGenerator):
         :param sim_threshold:
         :return:
         '''
-        ids_to_select_from = set()
+        ids_to_select_from = set(user_id_indexes) # in original version, this was: set()
         for member in group:
             member_index = user_id_indexes.tolist().index(member)
             indexes = np.where(sim_matrix[member_index] < sim_threshold)[0].tolist()
             user_ids = [user_id_indexes[index] for index in indexes]
-            ids_to_select_from = ids_to_select_from.union(set(user_ids))
+            ids_to_select_from = ids_to_select_from.intersection(set(user_ids)) # .union in original implementation
         candidate_ids = ids_to_select_from.difference(set(group))
         if len(candidate_ids) == 0:
             return None
@@ -196,4 +200,76 @@ class MinorityGroupsGenerator(GroupsGenerator):
             groups_list.extend(groups_size_list)
             print(len(groups_list))
         return groups_list
+    
+class TwoSubgroupsGenerator(GroupsGenerator):
+
+    @staticmethod
+    def select_user_similar_divergent(group_similar,group_divergent, sim_matrix, user_id_indexes, sim_threshold=0.4, div_threshold=0.0):
+        '''
+        Helper function to the get user that is similar to first group but divergent from another one. Given already selected group members, it randomly selects from the remaining users that has a PCC value >= sim_threshold to all of the existing members of G1 and <= div_threshold to all existing members of G2. 
+        :param group:
+        :param sim_matrix:
+        :param user_id_indexes:
+        :param sim_threshold:
+        :return:
+        '''
+        ids_to_select_from =  set(user_id_indexes) # in original version, this was: set()
+        for member in group_similar:
+            member_index = user_id_indexes.tolist().index(member)
+            indexes = np.where(sim_matrix[member_index] >= sim_threshold)[0].tolist()
+            user_ids = [user_id_indexes[index] for index in indexes]
+            ids_to_select_from = ids_to_select_from.intersection(set(user_ids)) # .union in original implementation
+            
+        for member in group_divergent:
+            member_index = user_id_indexes.tolist().index(member)
+            indexes = np.where(sim_matrix[member_index] <= div_threshold)[0].tolist()
+            user_ids = [user_id_indexes[index] for index in indexes]
+            ids_to_select_from = ids_to_select_from.intersection(set(user_ids)) # .union in original implementation  
+            
+        candidate_ids = ids_to_select_from.difference(set(group_similar).union(set(group_divergent)))
+        if len(candidate_ids) == 0:
+            return None
+        else:
+            selection = random.sample(candidate_ids, 1)
+            return selection[0]    
+    
+    def generateGroups(self, user_id_indexes, user_id_set, similarity_matrix, group_sizes_to_create, group_number_to_create):
+        groups_list = list()
+        smallerGroupSize = 2 #constant for now
+        for group_size in group_sizes_to_create:
+            groups_size_list = list()
+            while (len(groups_size_list) < group_number_to_create):
+                group = random.sample(user_id_set, 1)
+                while len(group) < (group_size - smallerGroupSize):
+                    new_member = SimilarGroupsGenerator.select_user_for_sim_group(group, similarity_matrix,
+                                                                                     user_id_indexes,
+                                                                                     sim_threshold=cfg.similar_threshold)
+                    if new_member is None:
+                        break
+                    group.append(new_member)
+
+                dissimilar_member = DivergentGroupsGenerator.select_user_for_divergent_group(group, similarity_matrix,
+                                                                                              user_id_indexes,
+                                                                                              sim_threshold=cfg.dissimilar_threshold)
+                if dissimilar_member is not None:                                        
+                    similar_to_dissimilar_member = TwoSubgroupsGenerator.select_user_similar_divergent([dissimilar_member],group, 
+                                                                                         similarity_matrix, user_id_indexes,
+                                                                                         sim_threshold=cfg.similar_threshold,
+                                                                                         div_threshold=cfg.dissimilar_threshold)
+                    group.append(dissimilar_member)
+                    if similar_to_dissimilar_member is not None:
+                        group.append(similar_to_dissimilar_member)
+                        
+                if len(group) == group_size:
+                    groups_size_list.append(
+                        {
+                            "group_size": group_size,
+                            "group_similarity": 'two_divergent_subgroups',
+                            "group_members": group,
+                            "avg_similarity": GroupsGenerator.compute_average_similarity(group, user_id_indexes, similarity_matrix)
+                        }
+                    )
+            groups_list.extend(groups_size_list)
+            print(len(groups_list))
+        return groups_list    
 
