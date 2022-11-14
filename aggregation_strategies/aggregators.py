@@ -3,6 +3,7 @@ import pandas as pd
 
 from abc import ABC, abstractmethod
 
+
 class AggregationStrategy(ABC):
 
     @staticmethod
@@ -17,6 +18,8 @@ class AggregationStrategy(ABC):
             return GFARAggregator()
         elif strategy == "EPFuzzDA":
             return EPFuzzDAAggregator()
+        elif strategy == "GreedyLM":
+            return GreedyLMAggregator()
         return None
 
     @abstractmethod
@@ -79,7 +82,7 @@ class GFARAggregator(AggregationStrategy):
         if top == 'max':
             score_df.loc[score_df.index, "predicted_rating_rev"] = -score_df["predicted_rating"]
 
-        select_top_n = min(top_n, len(score_df)-1)
+        select_top_n = min(top_n, len(score_df) - 1)
         top_n_ind = np.argpartition(score_df.predicted_rating_rev, select_top_n)[:select_top_n]
         top_n_df = score_df.iloc[top_n_ind]
 
@@ -237,3 +240,82 @@ class EPFuzzDAAggregator(AggregationStrategy):
     def generate_group_recommendations_for_group(self, group_ratings, recommendations_number):
         selected_items = self.ep_fuzzdhondt_algorithm(group_ratings, recommendations_number)
         return {"EPFuzzDA": selected_items}
+
+
+class GreedyLMAggregator:
+    def __init__(self):
+        self.rel_max = None
+        self.group_ratings = None
+
+    def generate_group_recommendations_for_group(self, group_ratings, recommendations_number):
+        self.group_ratings = group_ratings
+        self.rel_max = group_ratings.predicted_rating.max()
+
+        recommendation = np.empty([0])
+        items = group_ratings.item.unique()
+        users = group_ratings.user.unique()
+        lam = 0.5
+        while len(recommendation) < recommendations_number:
+            best_item = None
+            for item in items:
+                test_set = np.concatenate((recommendation, [item]))
+
+                individual_utilities = []
+                for user in users:
+                    individual_utilities.append(self.individual_utility_proportional(user, test_set))
+
+                # sw = self.social_welfare(users, test_set)
+                # f = self.fairness(users, test_set)
+                sw = np.mean(individual_utilities)
+                f = np.min(individual_utilities)
+
+                score = lam * sw + (1 - lam) * f
+
+                if best_item is None or best_item[1] < score:
+                    best_item = (item, score)
+
+            recommendation = np.append(recommendation, best_item[0])
+            items = items[items != best_item[0]]
+
+        return {"GreedyLM": recommendation}
+
+    def rel(self, user, item):
+        user_match = self.group_ratings.user == user
+        item_match = self.group_ratings.item == item
+
+        return self.group_ratings.loc[user_match & item_match, 'predicted_rating'].to_numpy()[0]
+
+    def individual_utility_average(self, user, items):
+        # acc = 0
+        # for item in items:
+        #     acc += self.rel(user, item)
+        # return acc / (len(items) * self.rel_max)
+
+        user_match = self.group_ratings.user == user
+        total_sum = self.group_ratings.loc[user_match & self.group_ratings.item.isin(items)].predicted_rating.sum()
+        return total_sum / (len(items) * self.rel_max)
+    
+    def individual_utility_proportional(self, user, items):
+        k = len(items)
+        user_match = self.group_ratings.user == user
+
+        top_k_sum = self.group_ratings.loc[user_match].nlargest(k, 'predicted_rating').predicted_rating.sum()
+        total_sum = self.group_ratings.loc[user_match & self.group_ratings.item.isin(items)].predicted_rating.sum()
+
+        return total_sum / top_k_sum
+
+    def social_welfare(self, group, items):
+        acc = 0
+        for user in group:
+            acc += self.individual_utility_average(user, items)
+
+        return acc / len(group)
+
+    def fairness(self, group, items):
+        cur_min = None
+        for user in group:
+            ind_util = self.individual_utility_average(user, items)
+            if cur_min is None or cur_min > ind_util:
+                cur_min = ind_util
+
+        return cur_min
